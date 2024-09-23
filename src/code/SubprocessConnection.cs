@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.IO.Pipes;
@@ -15,34 +16,17 @@ using System.Threading;
 
 namespace Microsoft.PowerShell.CustomNamedPipeConnection
 {
-    /// <summary>
-    /// This class is based on PowerShell core source code, and handles creating
-    /// a client side named pipe object that can connect to a running PowerShell 
-    /// process by its process Id.
-    /// </summary>
-    internal sealed class NamedPipeClient
+    internal sealed class SubprocessClient
     {
         private NamedPipeClientStream _clientPipeStream;
         private volatile bool _connecting;
 
-        /// <summary>
-        /// Accessor for the named pipe reader.
-        /// </summary>
         public StreamReader TextReader { get; private set; }
 
-        /// <summary>
-        /// Accessor for the named pipe writer.
-        /// </summary>
         public StreamWriter TextWriter { get; private set; }
 
-        /// <summary>
-        /// Name of the pipe.
-        /// </summary>
         public string PipeName { get; private set; }
 
-        /// <summary>
-        /// Dispose object.
-        /// </summary>
         public void Dispose()
         {
             Dispose(true);
@@ -79,25 +63,15 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
             }
         }
 
-        private NamedPipeClient()
+        private SubprocessClient()
         { }
 
-        /// <summary>
-        /// Constructor. Creates Named Pipe based on process Id.
-        /// </summary>
-        /// <param name="procId">Target process Id for pipe.</param>
-        public NamedPipeClient(int procId)
+        public SubprocessClient(int procId)
         {
             PipeName = CreateProcessPipeName(
                 System.Diagnostics.Process.GetProcessById(procId));
         }
 
-        /// <summary>
-        /// Create a pipe name based on process and appdomain name information.
-        /// E.g., "PSHost.ProcessStartTime.ProcessId.DefaultAppDomain.ProcessName"
-        /// </summary>
-        /// <param name="proc">Process object.</param>
-        /// <returns>Pipe name.</returns>
         private static string CreateProcessPipeName(System.Diagnostics.Process proc)
         {
             System.Text.StringBuilder pipeNameBuilder = new System.Text.StringBuilder();
@@ -122,11 +96,6 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
             return pipeNameBuilder.ToString();
         }
 
-        /// <summary>
-        /// Connect to named pipe server.  This is a blocking call until a
-        /// connection occurs or the timeout time has elapsed.
-        /// </summary>
-        /// <param name="timeout">Connection attempt timeout in milliseconds.</param>
         public void Connect(
             int timeout)
         {
@@ -139,9 +108,6 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
             TextWriter.AutoFlush = true;
         }
 
-        /// <summary>
-        /// Closes the named pipe.
-        /// </summary>
         public void Close()
         {
             if (_clientPipeStream != null)
@@ -150,9 +116,6 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
             }
         }
 
-        /// <summary>
-        /// Abort connection attempt.
-        /// </summary>
         public void AbortConnect()
         {
             _connecting = false;
@@ -195,112 +158,100 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
         }
     }
 
-    internal sealed class NamedPipeInfo : RunspaceConnectionInfo
+    internal sealed class SubprocessInfo : RunspaceConnectionInfo
     {
         private NamedPipeClient _clientPipe;
         private readonly string _computerName;
 
-        /// <summary>
-        /// Process Id to attach to.
-        /// </summary>
         public int ProcessId
         {
             get;
             set;
         }
 
-        /// <summary>
-        /// ConnectingTimeout in Milliseconds
-        /// </summary>
         public int ConnectingTimeout
         {
             get;
             set;
         }
 
-        private NamedPipeInfo()
+        private Process _process = null;
+        private bool _shallow = false;
+
+        private SubprocessInfo()
         { }
 
-        /// <summary>
-        /// Construct instance.
-        /// </summary>
-        public NamedPipeInfo(
+        public SubprocessInfo(
             int processId,
             int connectingTimeout)
         {
-            ProcessId = processId;
+            if (processId < 0)
+            {
+                _process = new Process();
+                _process.StartInfo.FileName = @"C:\Program Files\PowerShell\7\pwsh.exe";
+                _process.StartInfo.Arguments = "-NoLogo -NoProfile";
+                _process.StartInfo.RedirectStandardInput = true;
+                _process.StartInfo.RedirectStandardOutput = true;
+                _process.StartInfo.RedirectStandardError = true;
+                _process.StartInfo.UseShellExecute = false;
+                _process.StartInfo.CreateNoWindow = true;
+                _process.Start();
+                ProcessId = _process.Id;
+                _shallow = false;
+            }
+            else
+            {
+                ProcessId = processId;
+                _shallow = true;
+            }
+
             ConnectingTimeout = connectingTimeout;
-            _computerName = $"LocalMachine:{ProcessId}";
+            _computerName = $"Subprocess:{ProcessId}";
             _clientPipe = new NamedPipeClient(ProcessId);
         }
 
-        /// <summary>
-        /// ComputerName
-        /// </summary>
         public override string ComputerName
         {
             get { return _computerName; }
             set { throw new NotImplementedException(); }
         }
 
-        /// <summary>
-        /// Credential
-        /// </summary>
         public override PSCredential Credential
         {
             get { return null; }
             set { throw new NotImplementedException(); }
         }
 
-        /// <summary>
-        /// AuthenticationMechanism
-        /// </summary>
         public override AuthenticationMechanism AuthenticationMechanism
         {
             get { return AuthenticationMechanism.Default; }
             set { throw new NotImplementedException(); }
         }
 
-        /// <summary>
-        /// CertificateThumbprint
-        /// </summary>
         public override string CertificateThumbprint
         {
             get { return string.Empty; }
             set { throw new NotImplementedException(); }
         }
 
-        /// <summary>
-        /// Create shallow copy of NamedPipeInfo object.
-        /// </summary>
         public override RunspaceConnectionInfo Clone()
         {
-            var connectionInfo = new NamedPipeInfo(ProcessId, ConnectingTimeout);
+            var connectionInfo = new SubprocessInfo(ProcessId, ConnectingTimeout);
             connectionInfo._clientPipe = _clientPipe;
             return connectionInfo;
         }
 
-        /// <summary>
-        /// Create an instance of ClientSessionTransportManager.
-        /// </summary>
         public override BaseClientSessionTransportManager CreateClientSessionTransportManager(
             Guid instanceId,
             string sessionName,
             PSRemotingCryptoHelper cryptoHelper)
         {
-            return new NamedPipeClientSessionTransportMgr(
+            return new SubprocessClientSessionTransportMgr(
                 connectionInfo: this,
                 runspaceId: instanceId,
                 cryptoHelper: cryptoHelper);
         }
 
-        /// <summary>
-        /// Attempt to connect to process Id.
-        /// If connection fails, is aborted, or times out, an exception is thrown.
-        /// </summary>
-        /// <param name="textWriter">Named pipe text stream writer.</param>
-        /// <param name="textReader">Named pipe text stream reader.</param>
-        /// <exception cref="TimeoutException">Connect attempt times out or is aborted.</exception>
         public void Connect(
             out StreamWriter textWriter,
             out StreamReader textReader)
@@ -313,24 +264,42 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
             textReader = _clientPipe.TextReader;
         }
 
-        /// <summary>
-        /// Stops a connection attempt, or closes the connection that has been established.
-        /// </summary>
         public void StopConnect()
         {
             _clientPipe?.AbortConnect();
             _clientPipe?.Close();
             _clientPipe?.Dispose();
         }
+
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        private void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                StopConnect();
+
+                if (!_shallow && _process != null && !_process.HasExited)
+                {
+                    _process.Kill();
+                    _process.Dispose();
+                    _process = null;
+                }
+            }
+        }
     }
 
-    internal sealed class NamedPipeClientSessionTransportMgr : ClientSessionTransportManagerBase
+    internal sealed class SubprocessClientSessionTransportMgr : ClientSessionTransportManagerBase
     {
-        private readonly NamedPipeInfo _connectionInfo;
-        private const string _threadName = "NamedPipeCustomTransport Reader Thread";
+        private readonly SubprocessInfo _connectionInfo;
+        private const string _threadName = "SubprocessCustomTransport Reader Thread";
 
-        internal NamedPipeClientSessionTransportMgr(
-            NamedPipeInfo connectionInfo,
+        internal SubprocessClientSessionTransportMgr(
+            SubprocessInfo connectionInfo,
             Guid runspaceId,
             PSRemotingCryptoHelper cryptoHelper)
             : base(runspaceId, cryptoHelper)
@@ -340,10 +309,6 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
             _connectionInfo = connectionInfo;
         }
 
-        /// <summary>
-        /// Create a named pipe connection to the target process and set up
-        /// transport reader/writer.
-        /// </summary>
         public override void CreateAsync()
         {
             _connectionInfo.Connect(
@@ -433,48 +398,21 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
         }
     }
 
-    /// <summary>
-    /// Attempts to connect to the specified host computer and returns
-    /// a PSSession object representing the remote session.
-    /// </summary>
-    [Cmdlet(VerbsCommon.New, "NamedPipeSession")]
+    [Cmdlet(VerbsCommon.New, "SubprocessSession")]
     [OutputType(typeof(PSSession))]
-    public sealed class NewNamedPipeSessionCommand : PSCmdlet
+    public sealed class NewSubprocessSessionCommand : PSCmdlet
     {
-        private NamedPipeInfo _connectionInfo;
+        private SubprocessInfo _connectionInfo;
         private Runspace _runspace;
         private ManualResetEvent _openAsync;
 
-        /// <summary>
-        /// Name of host computer to connect to.
-        /// </summary>
-        [Parameter(Position=0, Mandatory=true)]
-        [ValidateNotNullOrEmpty]
-        public int ProcessId { get; set; }
-
-        /// <summary>
-        /// Optional value in seconds that limits the time allowed for a connection to be established.
-        /// </summary>
-        [Parameter]
-        [ValidateRange(-1, 86400)]
-        public int ConnectingTimeout { get; set; } = Timeout.Infinite;
-
-        /// <summary>
-        /// Optional name for the new PSSession.
-        /// </summary>
         [Parameter]
         [ValidateNotNullOrEmpty]
         public string Name { get; set; }
 
-        /// <summary>
-        /// EndProcessing override.
-        /// </summary>
         protected override void BeginProcessing()
         {
-            // Convert ConnectingTimeout value from seconds to milliseconds.
-            _connectionInfo = new NamedPipeInfo(
-                processId: ProcessId,
-                connectingTimeout: (ConnectingTimeout == Timeout.Infinite) ? Timeout.Infinite : ConnectingTimeout * 1000);
+            _connectionInfo = new SubprocessInfo(-1, 5 * 1000);
 
             _runspace = RunspaceFactory.CreateRunspace(
                 connectionInfo: _connectionInfo,
@@ -482,7 +420,7 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
                 typeTable: TypeTable.LoadDefaultTypeFiles(),
                 applicationArguments: null,
                 name: Name);
-            
+
             _openAsync = new ManualResetEvent(false);
             _runspace.StateChanged += HandleRunspaceStateChanged;
 
@@ -494,7 +432,7 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
                 WriteObject(
                     PSSession.Create(
                         runspace: _runspace,
-                        transportName: "PSNPTest",
+                        transportName: "Subprocess",
                         psCmdlet: this));
             }
             finally
@@ -503,9 +441,6 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
             }
         }
 
-        /// <summary>
-        /// StopProcessing override.
-        /// </summary>
         protected override void StopProcessing()
         {
             _connectionInfo?.StopConnect();
