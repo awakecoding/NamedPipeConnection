@@ -38,7 +38,7 @@ DotNetFrameworkVersion = '7.0'
 CLRVersion = '4.0.0'
 
 # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no cmdlets to export.
-CmdletsToExport = @('New-SubprocessSession')
+CmdletsToExport = @('New-SubprocessSession', 'New-PSHostSession')
 
 FunctionsToExport = @()
 
