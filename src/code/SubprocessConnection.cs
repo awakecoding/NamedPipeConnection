@@ -12,6 +12,7 @@ using System.Management.Automation.Internal;
 using System.Management.Automation.Remoting;
 using System.Management.Automation.Remoting.Client;
 using System.Management.Automation.Runspaces;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace Microsoft.PowerShell.CustomNamedPipeConnection
@@ -66,14 +67,19 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
         private SubprocessClient()
         { }
 
-        public SubprocessClient(int procId)
+        public SubprocessClient(int processId, string pipeName)
         {
-            PipeName = CreateProcessPipeName(
-                System.Diagnostics.Process.GetProcessById(procId));
+            PipeName = pipeName;
+
+            if (string.IsNullOrEmpty(PipeName))
+            {
+                PipeName = CreateProcessPipeName(processId);
+            }
         }
 
-        private static string CreateProcessPipeName(System.Diagnostics.Process proc)
+        private static string CreateProcessPipeName(int processId)
         {
+            Process proc = Process.GetProcessById(processId);
             System.Text.StringBuilder pipeNameBuilder = new System.Text.StringBuilder();
             pipeNameBuilder.Append(@"PSHost.");
 
@@ -96,13 +102,33 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
             return pipeNameBuilder.ToString();
         }
 
-        public void Connect(
-            int timeout)
+        public static string GetPwshPath()
         {
-            // Uses Native API to connect to pipe and return NamedPipeClientStream object.
-            _clientPipeStream = DoConnect(timeout);
+            string currentExePath = Process.GetCurrentProcess().MainModule.FileName;
 
-            // Create reader/writer streams.
+            if (currentExePath != null && Path.GetFileName(currentExePath).Contains("pwsh", StringComparison.OrdinalIgnoreCase))
+            {
+                return currentExePath;
+            }
+
+            string pwshExecutableName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "pwsh.exe" : "pwsh";
+
+            string[] paths = Environment.GetEnvironmentVariable("PATH").Split(Path.PathSeparator);
+            foreach (string path in paths)
+            {
+                string fullPath = Path.Combine(path, pwshExecutableName);
+                if (File.Exists(fullPath))
+                {
+                    return fullPath;
+                }
+            }
+
+            return null;
+        }
+
+        public void Connect(int timeout)
+        {
+            _clientPipeStream = DoConnect(timeout);
             TextReader = new StreamReader(_clientPipeStream);
             TextWriter = new StreamWriter(_clientPipeStream);
             TextWriter.AutoFlush = true;
@@ -121,9 +147,6 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
             _connecting = false;
         }
 
-        /// <summary>
-        /// Begin connection attempt.
-        /// </summary>
         private NamedPipeClientStream DoConnect(int timeout)
         {
             // Repeatedly attempt connection to pipe until timeout expires.
@@ -160,7 +183,7 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
 
     internal sealed class SubprocessInfo : RunspaceConnectionInfo
     {
-        private NamedPipeClient _clientPipe;
+        private SubprocessClient _clientPipe;
         private readonly string _computerName;
 
         public int ProcessId
@@ -169,7 +192,13 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
             set;
         }
 
-        public int ConnectingTimeout
+        public int ConnectionTimeout
+        {
+            get;
+            set;
+        }
+
+        public string CustomPipeName
         {
             get;
             set;
@@ -183,12 +212,14 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
 
         public SubprocessInfo(
             int processId,
-            int connectingTimeout)
+            int connectionTimeout,
+            string customPipeName)
         {
             if (processId < 0)
             {
+                string pwshPath = SubprocessClient.GetPwshPath();
                 _process = new Process();
-                _process.StartInfo.FileName = @"C:\Program Files\PowerShell\7\pwsh.exe";
+                _process.StartInfo.FileName = pwshPath;
                 _process.StartInfo.Arguments = "-NoLogo -NoProfile";
                 _process.StartInfo.RedirectStandardInput = true;
                 _process.StartInfo.RedirectStandardOutput = true;
@@ -205,9 +236,10 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
                 _shallow = true;
             }
 
-            ConnectingTimeout = connectingTimeout;
+            CustomPipeName = customPipeName;
+            ConnectionTimeout = connectionTimeout;
             _computerName = $"Subprocess:{ProcessId}";
-            _clientPipe = new NamedPipeClient(ProcessId);
+            _clientPipe = new SubprocessClient(ProcessId, CustomPipeName);
         }
 
         public override string ComputerName
@@ -236,7 +268,7 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
 
         public override RunspaceConnectionInfo Clone()
         {
-            var connectionInfo = new SubprocessInfo(ProcessId, ConnectingTimeout);
+            var connectionInfo = new SubprocessInfo(ProcessId, ConnectionTimeout, CustomPipeName);
             connectionInfo._clientPipe = _clientPipe;
             return connectionInfo;
         }
@@ -256,9 +288,8 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
             out StreamWriter textWriter,
             out StreamReader textReader)
         {
-            // Wait for named pipe to connect.
             _clientPipe.Connect(
-                timeout: ConnectingTimeout > -1 ? ConnectingTimeout : int.MaxValue);
+                timeout: ConnectionTimeout > -1 ? ConnectionTimeout : int.MaxValue);
 
             textWriter = _clientPipe.TextWriter;
             textReader = _clientPipe.TextReader;
@@ -315,10 +346,7 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
                 out StreamWriter pipeTextWriter,
                 out StreamReader pipeTextReader);
 
-            // Create writer for named pipe.
             SetMessageWriter(pipeTextWriter);
-
-            // Create reader thread for named pipe.
             StartReaderThread(pipeTextReader);
         }
 
@@ -408,11 +436,23 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
 
         [Parameter]
         [ValidateNotNullOrEmpty]
+        public int ProcessId { get; set; } = -1;
+
+        [Parameter]
+        [ValidateRange(-1, 86400)]
+        public int ConnectionTimeout { get; set; } = 5000;
+
+        [Parameter]
+        [ValidateNotNullOrEmpty]
         public string Name { get; set; }
+
+        [Parameter]
+        [ValidateNotNullOrEmpty]
+        public string CustomPipeName { get; set; }
 
         protected override void BeginProcessing()
         {
-            _connectionInfo = new SubprocessInfo(-1, 5 * 1000);
+            _connectionInfo = new SubprocessInfo(ProcessId, ConnectionTimeout, CustomPipeName);
 
             _runspace = RunspaceFactory.CreateRunspace(
                 connectionInfo: _connectionInfo,
