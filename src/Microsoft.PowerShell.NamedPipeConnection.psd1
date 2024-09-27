@@ -13,7 +13,7 @@ ModuleVersion = '1.0.0'
 CompatiblePSEditions = @('Core')
 
 # ID used to uniquely identify this module
-GUID = 'd73fd604-f213-47e2-b1cb-092bb73be2dc'
+GUID = '39e7aaeb-e6da-4f3b-af00-59f6ee3747c5'
 
 # Author of this module
 Author = 'Microsoft Corporation'
@@ -38,7 +38,7 @@ DotNetFrameworkVersion = '7.0'
 CLRVersion = '4.0.0'
 
 # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no cmdlets to export.
-CmdletsToExport = @('New-NamedPipeSession', 'New-SubprocessSession')
+CmdletsToExport = @('New-SubprocessSession')
 
 FunctionsToExport = @()
 
@@ -51,10 +51,10 @@ PrivateData = @{
         Tags = @('PowerShellCustomRemoteConnection')
 
         # A URL to the license for this module.
-        LicenseUri = 'https://github.com/PowerShell/NamedPipeConnection/blob/master/LICENSE'
+        LicenseUri = 'https://github.com/awakecoding/NamedPipeConnection/blob/master/LICENSE'
 
         # A URL to the main website for this project.
-        ProjectUri = 'https://github.com/powershell/NamedPipeConnection'
+        ProjectUri = 'https://github.com/awakecoding/NamedPipeConnection'
 
         # A URL to an icon representing this module.
         # IconUri = ''
