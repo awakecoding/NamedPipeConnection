@@ -17,32 +17,48 @@ using System.Threading;
 
 namespace Microsoft.PowerShell.CustomNamedPipeConnection
 {
-    internal sealed class PSHostClient
+    internal sealed class PSHostClientInfo : RunspaceConnectionInfo
     {
-        private volatile bool _connecting;
+        public override string ComputerName { get; set; }
 
-        public void Dispose()
+        public string Executable { get; set; }
+
+        public string Arguments { get; set; }
+
+        public override PSCredential Credential
         {
-            Dispose(true);
-            GC.SuppressFinalize(this);
+            get { return null; }
+            set { throw new NotImplementedException(); }
         }
 
-        private void Dispose(bool disposing)
+        public override AuthenticationMechanism AuthenticationMechanism
         {
-            if (!disposing)
-            {
-                return;
-            }
+            get { return AuthenticationMechanism.Default; }
+            set { throw new NotImplementedException(); }
         }
 
-        public PSHostClient()
+        public override string CertificateThumbprint
         {
+            get { return string.Empty; }
+            set { throw new NotImplementedException(); }
+        }
 
+        public PSHostClientInfo(string computerName, string executable, string arguments)
+        {
+            ComputerName = computerName;
+            Executable = executable;
+            Arguments = arguments;
+        }
+
+        public override RunspaceConnectionInfo Clone()
+        {
+            var connectionInfo = new PSHostClientInfo(ComputerName, Executable, Arguments);
+            return connectionInfo;
         }
 
         public static string GetPwshPath()
         {
-            string currentExePath = Process.GetCurrentProcess().MainModule.FileName;
+            string currentExePath = Environment.ProcessPath;
 
             if (currentExePath != null && Path.GetFileName(currentExePath).Contains("pwsh", StringComparison.OrdinalIgnoreCase))
             {
@@ -64,96 +80,6 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
             return null;
         }
 
-        public void Connect(int timeout)
-        {
-
-        }
-
-        public void Close()
-        {
-
-        }
-
-        public void AbortConnect()
-        {
-
-        }
-    }
-
-    internal sealed class PSHostClientInfo : RunspaceConnectionInfo
-    {
-        private PSHostClient _clientPipe;
-        private readonly string _computerName;
-        private Process _process;
-
-        public int ProcessId
-        {
-            get;
-            set;
-        }
-
-        public Process Process
-        {
-            get { return _process; }
-        }
-
-        private bool _shallow = false;
-
-        public PSHostClientInfo()
-        {
-            string pwshPath = PSHostClient.GetPwshPath();
-
-            Process _process = new Process();
-            _process.StartInfo.FileName = pwshPath;
-            _process.StartInfo.Arguments = "-s -NoLogo -NoProfile";
-            _process.StartInfo.RedirectStandardInput = true;
-            _process.StartInfo.RedirectStandardOutput = true;
-            _process.StartInfo.RedirectStandardError = true;
-            _process.StartInfo.UseShellExecute = false;
-            _process.StartInfo.CreateNoWindow = true;
-            _process.Start();
-            ProcessId = _process.Id;
-            _shallow = false;
-            _computerName = $"PSHost:{ProcessId}";
-        }
-
-        public PSHostClientInfo(int processId)
-        {
-            ProcessId = processId;
-            _shallow = true;
-            _computerName = $"PSHost:{ProcessId}";
-        }
-
-        public override string ComputerName
-        {
-            get { return _computerName; }
-            set { throw new NotImplementedException(); }
-        }
-
-        public override PSCredential Credential
-        {
-            get { return null; }
-            set { throw new NotImplementedException(); }
-        }
-
-        public override AuthenticationMechanism AuthenticationMechanism
-        {
-            get { return AuthenticationMechanism.Default; }
-            set { throw new NotImplementedException(); }
-        }
-
-        public override string CertificateThumbprint
-        {
-            get { return string.Empty; }
-            set { throw new NotImplementedException(); }
-        }
-
-        public override RunspaceConnectionInfo Clone()
-        {
-            var connectionInfo = new PSHostClientInfo(ProcessId);
-            return connectionInfo;
-        }
-
         public override BaseClientSessionTransportManager CreateClientSessionTransportManager(
             Guid instanceId,
             string sessionName,
@@ -164,40 +90,12 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
                 runspaceId: instanceId,
                 cryptoHelper: cryptoHelper);
         }
-
-        public void StopConnect()
-        {
-            _clientPipe?.AbortConnect();
-            _clientPipe?.Close();
-            _clientPipe?.Dispose();
-        }
-
-        public void Dispose()
-        {
-            Dispose(true);
-            GC.SuppressFinalize(this);
-        }
-
-        private void Dispose(bool disposing)
-        {
-            if (disposing)
-            {
-                StopConnect();
-
-                if (!_shallow && _process != null && !_process.HasExited)
-                {
-                    _process.Kill();
-                    _process.Dispose();
-                    _process = null;
-                }
-            }
-        }
     }
 
     internal sealed class PSHostClientSessionTransportMgr : ClientSessionTransportManagerBase
     {
         private readonly PSHostClientInfo _connectionInfo;
-        private const string _threadName = "PSHostClientCustomTransport Reader Thread";
+        private Process? _process = null;
 
         internal PSHostClientSessionTransportMgr(
             PSHostClientInfo connectionInfo,
@@ -206,16 +104,38 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
             : base(runspaceId, cryptoHelper)
         {
             if (connectionInfo == null) { throw new PSArgumentException("connectionInfo"); }
-
             _connectionInfo = connectionInfo;
         }
 
         public override void CreateAsync()
         {
-            // connect here
-            Process process = _connectionInfo.Process;
-            SetMessageWriter(process.StandardInput);
-            StartReaderThread(process.StandardOutput);
+            _process = new Process();
+            _process.StartInfo.FileName = _connectionInfo.Executable;
+            _process.StartInfo.Arguments = _connectionInfo.Arguments;
+            _process.StartInfo.RedirectStandardInput = true;
+            _process.StartInfo.RedirectStandardOutput = true;
+            _process.StartInfo.RedirectStandardError = true;
+            _process.StartInfo.UseShellExecute = false;
+            _process.StartInfo.CreateNoWindow = true;
+
+            _process.ErrorDataReceived += ErrorDataReceived;
+            _process.OutputDataReceived += OutputDataReceived;
+            _process.Start();
+            _process.BeginOutputReadLine();
+            _process.BeginErrorReadLine();
+
+            SetMessageWriter(_process.StandardInput);
+            SendOneItem();
+        }
+
+        private void ErrorDataReceived(object? sender, DataReceivedEventArgs args)
+        {
+            HandleErrorDataReceived(args.Data);
+        }
+
+        private void OutputDataReceived(object? sender, DataReceivedEventArgs args)
+        {
+            HandleOutputDataReceived(args.Data);
         }
 
         protected override void Dispose(bool isDisposing)
@@ -224,73 +144,15 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
 
             if (isDisposing)
             {
-                CloseConnection();
+                CleanupConnection();
             }
         }
 
         protected override void CleanupConnection()
         {
-            CloseConnection();
-        }
-
-        private void CloseConnection()
-        {
-            _connectionInfo.StopConnect();
-        }
-
-        private void HandleSSHError(PSRemotingTransportException ex)
-        {
-            RaiseErrorHandler(
-                new TransportErrorOccuredEventArgs(
-                    ex,
-                    TransportMethodEnum.CloseShellOperationEx));
-
-            CloseConnection();
-        }
-
-        private void StartReaderThread(
-    StreamReader reader)
-        {
-            Thread readerThread = new Thread(ProcessReaderThread);
-            readerThread.Name = _threadName;
-            readerThread.IsBackground = true;
-            readerThread.Start(reader);
-        }
-
-        private void ProcessReaderThread(object state)
-        {
-            try
-            {
-                StreamReader reader = state as StreamReader;
-
-                // Send one fragment.
-                SendOneItem();
-
-                // Start reader loop.
-                while (true)
-                {
-                    string data = reader.ReadLine();
-                    if (data == null)
-                    {
-                        // End of stream indicates that the SSH transport is broken.
-                        // SSH will return the appropriate error in StdErr stream so
-                        // let the error reader thread report the error.
-                        break;
-                    }
-
-                    HandleDataReceived(data);
-                }
-            }
-            catch (ObjectDisposedException)
-            {
-                // Normal reader thread end.
-            }
-            catch (Exception e)
-            {
-                string errorMsg = e.Message ?? string.Empty;
-                HandleSSHError(new PSRemotingTransportException(
-                    $"The SSH client session has ended reader thread with message: {errorMsg}"));
-            }
+            _process?.WaitForExit();
+            _process?.Dispose();
+            _process = null;
         }
     }
 
@@ -304,7 +166,11 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
 
         protected override void BeginProcessing()
         {
-            _connectionInfo = new PSHostClientInfo();
+            string computerName = "localhost";
+            string executable = PSHostClientInfo.GetPwshPath();
+            string arguments = "-NoLogo -NoProfile -s";
+
+            _connectionInfo = new PSHostClientInfo(computerName, executable, arguments);
 
             _runspace = RunspaceFactory.CreateRunspace(
                 connectionInfo: _connectionInfo,
@@ -324,7 +190,7 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
                 WriteObject(
                     PSSession.Create(
                         runspace: _runspace,
-                        transportName: "Subprocess",
+                        transportName: "PSHostSession",
                         psCmdlet: this));
             }
             finally
@@ -335,7 +201,7 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
 
         protected override void StopProcessing()
         {
-            _connectionInfo?.StopConnect();
+
         }
 
         private void HandleRunspaceStateChanged(
