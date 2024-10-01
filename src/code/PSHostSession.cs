@@ -25,7 +25,7 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
 
         public string Arguments { get; set; }
 
-        public override PSCredential Credential
+        public override PSCredential? Credential
         {
             get { return null; }
             set { throw new NotImplementedException(); }
@@ -56,9 +56,9 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
             return connectionInfo;
         }
 
-        public static string GetPwshPath()
+        public static string? GetPwshPath()
         {
-            string currentExePath = Environment.ProcessPath;
+            string? currentExePath = Environment.ProcessPath;
 
             if (currentExePath != null && Path.GetFileName(currentExePath).Contains("pwsh", StringComparison.OrdinalIgnoreCase))
             {
@@ -67,7 +67,11 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
 
             string pwshExecutableName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "pwsh.exe" : "pwsh";
 
-            string[] paths = Environment.GetEnvironmentVariable("PATH").Split(Path.PathSeparator);
+            string[]? paths = Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator);
+
+            if (paths == null)
+                return null;
+
             foreach (string path in paths)
             {
                 string fullPath = Path.Combine(path, pwshExecutableName);
@@ -160,15 +164,20 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
     [OutputType(typeof(PSSession))]
     public sealed class NewPSHostSessionCommand : PSCmdlet
     {
-        private PSHostClientInfo _connectionInfo;
-        private Runspace _runspace;
-        private ManualResetEvent _openAsync;
+        private PSHostClientInfo? _connectionInfo;
+        private Runspace? _runspace;
+        private ManualResetEvent? _openAsync;
 
         protected override void BeginProcessing()
         {
             string computerName = "localhost";
-            string executable = PSHostClientInfo.GetPwshPath();
+            string? executable = PSHostClientInfo.GetPwshPath();
             string arguments = "-NoLogo -NoProfile -s";
+
+            if (executable == null)
+            {
+                throw new InvalidOperationException("The pwsh executable path could not be found.");
+            }
 
             _connectionInfo = new PSHostClientInfo(computerName, executable, arguments);
 
@@ -201,19 +210,20 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
 
         protected override void StopProcessing()
         {
-
+            ReleaseWait();
         }
 
-        private void HandleRunspaceStateChanged(
-            object source,
-            RunspaceStateEventArgs stateEventArgs)
+        private void HandleRunspaceStateChanged(object? source, RunspaceStateEventArgs stateEventArgs)
         {
             switch (stateEventArgs.RunspaceStateInfo.State)
             {
                 case RunspaceState.Opened:
                 case RunspaceState.Closed:
                 case RunspaceState.Broken:
-                    _runspace.StateChanged -= HandleRunspaceStateChanged;
+                    if (_runspace != null)
+                    {
+                        _runspace.StateChanged -= HandleRunspaceStateChanged;
+                    }
                     ReleaseWait();
                     break;
             }
@@ -226,7 +236,9 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
                 _openAsync?.Set();
             }
             catch (ObjectDisposedException)
-            { }
+            {
+
+            }
         }
     }
 }
