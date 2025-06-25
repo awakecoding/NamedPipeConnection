@@ -154,8 +154,14 @@ namespace Microsoft.PowerShell.CustomNamedPipeConnection
 
         protected override void CleanupConnection()
         {
-            _process?.WaitForExit();
-            _process?.Dispose();
+            if (_process != null)
+            {
+                if (!_process.HasExited)
+                {
+                    _process.Kill();
+                }
+                _process.Dispose();
+            }
             _process = null;
         }
     }
